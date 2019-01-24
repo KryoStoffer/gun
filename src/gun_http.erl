@@ -148,7 +148,7 @@ handle(Data, State=#http_state{in=head, buffer=Buffer,
 			EvHandlerState0
 	end,
 	Data2 = << Buffer/binary, Data/binary >>,
-	case binary:match(Data2, <<"\r\n\r\n">>) of
+	case binary:match(Data2, [ <<"\n\n">>, <<"\r\n\r\n">>]) of
 		nomatch ->
 			{{state, State#http_state{buffer=Data2}}, CookieStore, EvHandlerState};
 		{_, _} ->
