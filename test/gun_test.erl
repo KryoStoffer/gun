@@ -1,4 +1,4 @@
-%% Copyright (c) 2018-2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2018-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -16,10 +16,6 @@
 -compile(export_all).
 -compile(nowarn_export_all).
 
--ifdef(OTP_RELEASE).
--compile({nowarn_deprecated_function, [{ssl, ssl_accept, 2}]}).
--endif.
-
 %% Cowboy listeners.
 
 init_cowboy_tcp(Ref, ProtoOpts, Config) ->
@@ -28,7 +24,9 @@ init_cowboy_tcp(Ref, ProtoOpts, Config) ->
 
 init_cowboy_tls(Ref, ProtoOpts, Config) ->
 	Opts = ct_helper:get_certs_from_ets(),
-	{ok, _} = cowboy:start_tls(Ref, Opts ++ [{port, 0}], ProtoOpts),
+	{ok, _} = cowboy:start_tls(Ref,
+		[{verify, verify_none}, {fail_if_no_peer_cert, false}]
+			++ Opts ++ [{port, 0}], ProtoOpts),
 	[{ref, Ref}, {port, ranch:get_port(Ref)}|Config].
 
 %% Origin server helpers.
@@ -37,7 +35,7 @@ init_origin(Transport) ->
 	init_origin(Transport, http).
 
 init_origin(Transport, Protocol) ->
-	init_origin(Transport, Protocol, fun loop_origin/3).
+	init_origin(Transport, Protocol, fun loop_origin/4).
 
 init_origin(Transport, Protocol, Fun) ->
 	Pid = spawn_link(?MODULE, init_origin, [self(), Transport, Protocol, Fun]),
@@ -59,18 +57,21 @@ init_origin(Parent, Transport, Protocol, Fun)
 		_ -> ok
 	end,
 	Parent ! {self(), handshake_completed},
-	Fun(Parent, ClientSocket, gen_tcp);
+	Fun(Parent, ListenSocket, ClientSocket, gen_tcp);
 init_origin(Parent, tls, Protocol, Fun) ->
 	Opts0 = ct_helper:get_certs_from_ets(),
-	Opts = case Protocol of
+	Opts1 = case Protocol of
 		http2 -> [{alpn_preferred_protocols, [<<"h2">>]}|Opts0];
 		_ -> Opts0
 	end,
-	{ok, ListenSocket} = ssl:listen(0, [binary, {active, false}|Opts]),
+	%% sni_hosts is necessary for SNI tests to succeed.
+	Opts = [{sni_hosts, [{net_adm:localhost(), []}]}|Opts1],
+	{ok, ListenSocket} = ssl:listen(0, [binary, {active, false},
+		{fail_if_no_peer_cert, false}|Opts]),
 	{ok, {_, Port}} = ssl:sockname(ListenSocket),
 	Parent ! {self(), Port},
-	{ok, ClientSocket} = ssl:transport_accept(ListenSocket, 5000),
-	ok = ssl:ssl_accept(ClientSocket, 5000),
+	{ok, ClientSocket0} = ssl:transport_accept(ListenSocket, 5000),
+	{ok, ClientSocket} = ssl:handshake(ClientSocket0, 5000),
 	case Protocol of
 		http2 ->
 			{ok, <<"h2">>} = ssl:negotiated_protocol(ClientSocket),
@@ -79,7 +80,7 @@ init_origin(Parent, tls, Protocol, Fun) ->
 			ok
 	end,
 	Parent ! {self(), handshake_completed},
-	Fun(Parent, ClientSocket, ssl).
+	Fun(Parent, ListenSocket, ClientSocket, ssl).
 
 http2_handshake(Socket, Transport) ->
 	%% Send a valid preface.
@@ -98,11 +99,11 @@ http2_handshake(Socket, Transport) ->
 	{ok, <<0:24, 4:8, 1:8, 0:32>>} = Transport:recv(Socket, 9, 5000),
 	ok.
 
-loop_origin(Parent, ClientSocket, ClientTransport) ->
+loop_origin(Parent, ListenSocket, ClientSocket, ClientTransport) ->
 	case ClientTransport:recv(ClientSocket, 0, 5000) of
 		{ok, Data} ->
 			Parent ! {self(), Data},
-			loop_origin(Parent, ClientSocket, ClientTransport);
+			loop_origin(Parent, ListenSocket, ClientSocket, ClientTransport);
 		{error, closed} ->
 			ok
 	end.

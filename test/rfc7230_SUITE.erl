@@ -1,4 +1,4 @@
-%% Copyright (c) 2019-2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2019-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -57,7 +57,10 @@ host_other_port_https(_) ->
 
 do_host_port(Transport, DefaultPort, HostHeaderPort) ->
 	{ok, OriginPid, OriginPort} = init_origin(Transport, http),
-	{ok, ConnPid} = gun:open("localhost", OriginPort, #{transport => Transport}),
+	{ok, ConnPid} = gun:open("localhost", OriginPort, #{
+		transport => Transport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}]
+	}),
 	{ok, http} = gun:await_up(ConnPid),
 	%% Change the origin's port in the state to trigger the default port behavior.
 	_ = sys:replace_state(ConnPid, fun({StateName, StateData}) ->
@@ -76,7 +79,7 @@ transfer_encoding_overrides_content_length(_) ->
 	doc("When both transfer-encoding and content-length are provided, "
 		"content-length must be ignored. (RFC7230 3.3.3)"),
 	{ok, _, OriginPort} = init_origin(tcp, http,
-		fun(_, ClientSocket, ClientTransport) ->
+		fun(_, _, ClientSocket, ClientTransport) ->
 			{ok, _} = ClientTransport:recv(ClientSocket, 0, 1000),
 			ClientTransport:send(ClientSocket,
 				"HTTP/1.1 200 OK\r\n"

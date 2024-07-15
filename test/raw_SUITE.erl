@@ -1,4 +1,4 @@
-%% Copyright (c) 2019-2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2019-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -30,23 +30,47 @@ groups() ->
 
 direct_raw_tcp(_) ->
 	doc("Directly connect to a remote endpoint using the raw protocol over TCP."),
-	do_direct_raw(tcp).
+	do_direct_raw(tcp, flow_control_disabled, client_side_close).
 
 direct_raw_tls(_) ->
 	doc("Directly connect to a remote endpoint using the raw protocol over TLS."),
-	do_direct_raw(tls).
+	do_direct_raw(tls, flow_control_disabled, client_side_close).
 
-do_direct_raw(OriginTransport) ->
-	{ok, OriginPid, OriginPort} = init_origin(OriginTransport, raw, fun do_echo/3),
-	{ok, ConnPid} = gun:open("localhost", OriginPort, #{
+direct_raw_tcp_with_flow_control(_) ->
+	doc("Directly connect to a remote endpoint using the raw protocol over TCP "
+		"with flow control enabled."),
+	do_direct_raw(tcp, flow_control_enabled, client_side_close).
+
+direct_raw_tls_with_flow_control(_) ->
+	doc("Directly connect to a remote endpoint using the raw protocol over TLS "
+		"with flow control enabled."),
+	do_direct_raw(tls, flow_control_enabled, client_side_close).
+
+direct_raw_tcp_with_server_side_close(_) ->
+	doc("Directly connect to a remote endpoint using the raw protocol over TCP "
+		"with server-side close."),
+	do_direct_raw(tcp, flow_control_disabled, server_side_close).
+
+direct_raw_tls_with_server_side_close(_) ->
+	doc("Directly connect to a remote endpoint using the raw protocol over TLS "
+		"with server-side close."),
+	do_direct_raw(tls, flow_control_disabled, server_side_close).
+
+do_direct_raw(OriginTransport, FlowControl, CloseSide) ->
+	{ok, OriginPid, OriginPort} = init_origin(OriginTransport, raw, fun do_echo/4),
+	Opts0 = #{
 		transport => OriginTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 		protocols => [raw]
-	}),
+	},
+	Opts = do_maybe_add_flow(FlowControl, Opts0),
+	{ok, ConnPid} = gun:open("localhost", OriginPort, Opts),
 	{ok, raw} = gun:await_up(ConnPid),
 	handshake_completed = receive_from(OriginPid),
 	%% When we take over the entire connection there is no stream reference.
 	gun:data(ConnPid, undefined, nofin, <<"Hello world!">>),
 	{data, nofin, <<"Hello world!">>} = gun:await(ConnPid, undefined),
+	do_flow_control(FlowControl, ConnPid),
 	#{
 		transport := OriginTransport,
 		protocol := raw,
@@ -55,7 +79,30 @@ do_direct_raw(OriginTransport) ->
 		origin_port := OriginPort,
 		intermediaries := []
 	} = gun:info(ConnPid),
-	gun:close(ConnPid).
+	do_close(CloseSide, ConnPid).
+
+do_maybe_add_flow(flow_control_enabled, Opts) ->
+	Opts#{raw_opts => #{flow => 1}};
+do_maybe_add_flow(flow_control_disabled, Opts) ->
+	Opts.
+
+do_flow_control(flow_control_enabled, ConnPid) ->
+	gun:data(ConnPid, undefined, nofin, <<"Hello world!">>),
+	{error, timeout} = gun:await(ConnPid, undefined, 1000),
+	ok = gun:update_flow(ConnPid, undefined, 1),
+	{data, nofin, <<"Hello world!">>} = gun:await(ConnPid, undefined);
+do_flow_control(flow_control_disabled, _ConnPid) ->
+	ok.
+
+do_close(client_side_close, ConnPid) ->
+	gun:close(ConnPid);
+do_close(server_side_close, ConnPid) ->
+	gun:data(ConnPid, undefined, nofin, <<"close">>),
+	receive
+		{gun_down, ConnPid, raw, closed, []} -> ok
+	after
+		1000 -> error(timeout)
+	end.
 
 socks5_tcp_raw_tcp(_) ->
 	doc("Use Socks5 over TCP to connect to a remote endpoint using the raw protocol over TCP."),
@@ -74,14 +121,16 @@ socks5_tls_raw_tls(_) ->
 	do_socks5_raw(tls, tls).
 
 do_socks5_raw(OriginTransport, ProxyTransport) ->
-	{ok, OriginPid, OriginPort} = init_origin(OriginTransport, raw, fun do_echo/3),
+	{ok, OriginPid, OriginPort} = init_origin(OriginTransport, raw, fun do_echo/4),
 	{ok, ProxyPid, ProxyPort} = socks_SUITE:do_proxy_start(ProxyTransport, none),
 	{ok, ConnPid} = gun:open("localhost", ProxyPort, #{
 		transport => ProxyTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 		protocols => [{socks, #{
 			host => "localhost",
 			port => OriginPort,
 			transport => OriginTransport,
+			tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 			protocols => [raw]
 		}}]
 	}),
@@ -127,15 +176,19 @@ connect_tls_raw_tls(_) ->
 	do_connect_raw(tls, tls).
 
 do_connect_raw(OriginTransport, ProxyTransport) ->
-	{ok, OriginPid, OriginPort} = init_origin(OriginTransport, raw, fun do_echo/3),
+	{ok, OriginPid, OriginPort} = init_origin(OriginTransport, raw, fun do_echo/4),
 	{ok, ProxyPid, ProxyPort} = rfc7231_SUITE:do_proxy_start(ProxyTransport),
 	Authority = iolist_to_binary(["localhost:", integer_to_binary(OriginPort)]),
-	{ok, ConnPid} = gun:open("localhost", ProxyPort, #{transport => ProxyTransport}),
+	{ok, ConnPid} = gun:open("localhost", ProxyPort, #{
+		transport => ProxyTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}]
+	}),
 	{ok, http} = gun:await_up(ConnPid),
 	StreamRef = gun:connect(ConnPid, #{
 		host => "localhost",
 		port => OriginPort,
 		transport => OriginTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 		protocols => [raw]
 	}),
 	{request, <<"CONNECT">>, Authority, 'HTTP/1.1', _} = receive_from(ProxyPid),
@@ -171,7 +224,7 @@ connect_raw_reply_to(_) ->
 		{data, nofin, <<"Hello world!">>} = gun:await(ConnPid, StreamRef),
 		Self ! {self(), ok}
 	end),
-	{ok, OriginPid, OriginPort} = init_origin(tcp, raw, fun do_echo/3),
+	{ok, OriginPid, OriginPort} = init_origin(tcp, raw, fun do_echo/4),
 	{ok, ProxyPid, ProxyPort} = rfc7231_SUITE:do_proxy_start(tcp),
 	{ok, ConnPid} = gun:open("localhost", ProxyPort),
 	{ok, http} = gun:await_up(ConnPid),
@@ -197,7 +250,7 @@ http11_upgrade_raw_tls(_) ->
 
 do_http11_upgrade_raw(OriginTransport) ->
 	{ok, OriginPid, OriginPort} = init_origin(OriginTransport, raw,
-		fun (Parent, ClientSocket, ClientTransport) ->
+		fun (Parent, ListenSocket, ClientSocket, ClientTransport) ->
 			%% We skip the request and send a 101 response unconditionally.
 			{ok, _} = ClientTransport:recv(ClientSocket, 0, 5000),
 			ClientTransport:send(ClientSocket,
@@ -205,10 +258,11 @@ do_http11_upgrade_raw(OriginTransport) ->
 				"Connection: upgrade\r\n"
 				"Upgrade: custom/1.0\r\n"
 				"\r\n"),
-			do_echo(Parent, ClientSocket, ClientTransport)
+			do_echo(Parent, ListenSocket, ClientSocket, ClientTransport)
 		end),
 	{ok, ConnPid} = gun:open("localhost", OriginPort, #{
-		transport => OriginTransport
+		transport => OriginTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}]
 	}),
 	{ok, http} = gun:await_up(ConnPid),
 	handshake_completed = receive_from(OriginPid),
@@ -242,7 +296,7 @@ http11_upgrade_raw_reply_to(_) ->
 		Self ! {self(), ok}
 	end),
 	{ok, OriginPid, OriginPort} = init_origin(tcp, raw,
-		fun (Parent, ClientSocket, ClientTransport) ->
+		fun (Parent, ListenSocket, ClientSocket, ClientTransport) ->
 			%% We skip the request and send a 101 response unconditionally.
 			{ok, _} = ClientTransport:recv(ClientSocket, 0, 5000),
 			ClientTransport:send(ClientSocket,
@@ -250,7 +304,7 @@ http11_upgrade_raw_reply_to(_) ->
 				"Connection: upgrade\r\n"
 				"Upgrade: custom/1.0\r\n"
 				"\r\n"),
-			do_echo(Parent, ClientSocket, ClientTransport)
+			do_echo(Parent, ListenSocket, ClientSocket, ClientTransport)
 		end),
 	{ok, ConnPid} = gun:open("localhost", OriginPort),
 	{ok, http} = gun:await_up(ConnPid),
@@ -273,13 +327,14 @@ http2_connect_tls_raw_tcp(_) ->
 	do_http2_connect_raw(tcp, <<"https">>, tls).
 
 do_http2_connect_raw(OriginTransport, ProxyScheme, ProxyTransport) ->
-	{ok, OriginPid, OriginPort} = init_origin(OriginTransport, raw, fun do_echo/3),
+	{ok, OriginPid, OriginPort} = init_origin(OriginTransport, raw, fun do_echo/4),
 	{ok, ProxyPid, ProxyPort} = rfc7540_SUITE:do_proxy_start(ProxyTransport, [
 		{proxy_stream, 1, 200, [], 0, undefined}
 	]),
 	Authority = iolist_to_binary(["localhost:", integer_to_binary(OriginPort)]),
 	{ok, ConnPid} = gun:open("localhost", ProxyPort, #{
 		transport => ProxyTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 		protocols => [http2]
 	}),
 	{ok, http2} = gun:await_up(ConnPid),
@@ -324,11 +379,13 @@ do_http2_connect_raw(OriginTransport, ProxyScheme, ProxyTransport) ->
 
 %% The origin server will echo everything back.
 
-do_echo(Parent, ClientSocket, ClientTransport) ->
+do_echo(Parent, ListenSocket, ClientSocket, ClientTransport) ->
 	case ClientTransport:recv(ClientSocket, 0, 5000) of
+		{ok, <<"close">>} ->
+			ok = ClientTransport:close(ClientSocket);
 		{ok, Data} ->
 			ClientTransport:send(ClientSocket, Data),
-			do_echo(Parent, ClientSocket, ClientTransport);
+			do_echo(Parent, ListenSocket, ClientSocket, ClientTransport);
 		{error, closed} ->
 			ok
 	end.

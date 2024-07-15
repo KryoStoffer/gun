@@ -1,4 +1,4 @@
-%% Copyright (c) 2017-2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2017-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -13,6 +13,7 @@
 %% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 -module(gun_ws_h).
+-behavior(gun_ws_protocol).
 
 -export([init/4]).
 -export([handle/2]).

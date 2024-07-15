@@ -1,4 +1,4 @@
-%% Copyright (c) 2015-2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2015-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -140,7 +140,7 @@ default_keepalive() -> infinity.
 init(ReplyTo, Socket, Transport, #{stream_ref := StreamRef, headers := Headers,
 		extensions := Extensions, flow := InitialFlow, handler := Handler, opts := Opts}) ->
 	{ok, HandlerState} = Handler:init(ReplyTo, StreamRef, Headers, Opts),
-	{connected_ws_only, #ws_state{reply_to=ReplyTo, stream_ref=StreamRef,
+	{ok, connected_ws_only, #ws_state{reply_to=ReplyTo, stream_ref=StreamRef,
 		socket=Socket, transport=Transport, opts=Opts, extensions=Extensions,
 		flow=InitialFlow, handler=Handler, handler_state=HandlerState}}.
 
@@ -299,8 +299,7 @@ close(_, _, _, EvHandlerState) ->
 	EvHandlerState.
 
 keepalive(State=#ws_state{reply_to=ReplyTo}, EvHandler, EvHandlerState0) ->
-	{[], EvHandlerState} = send(ping, State, ReplyTo, EvHandler, EvHandlerState0),
-	{State, EvHandlerState}.
+	send(ping, State, ReplyTo, EvHandler, EvHandlerState0).
 
 %% Send one frame.
 send(Frame, State=#ws_state{stream_ref=StreamRef,
@@ -313,20 +312,25 @@ send(Frame, State=#ws_state{stream_ref=StreamRef,
 		frame => Frame
 	},
 	EvHandlerState1 = EvHandler:ws_send_frame_start(WsSendFrameEvent, EvHandlerState0),
-	Transport:send(Socket, cow_ws:masked_frame(Frame, Extensions)),
-	EvHandlerState = EvHandler:ws_send_frame_end(WsSendFrameEvent, EvHandlerState1),
-	if
-		Frame =:= close; element(1, Frame) =:= close ->
-			{[
-				{state, State#ws_state{out=close}},
-				%% We can close immediately if we already received a close frame.
-				case In of
-					close -> close;
-					_ -> closing(State)
-				end
-			], EvHandlerState};
-		true ->
-			{[], EvHandlerState}
+	case Transport:send(Socket, cow_ws:masked_frame(Frame, Extensions)) of
+		ok ->
+			EvHandlerState = EvHandler:ws_send_frame_end(WsSendFrameEvent, EvHandlerState1),
+			if
+				Frame =:= close; element(1, Frame) =:= close ->
+					{[
+						{state, State#ws_state{out=close}},
+						%% We can close immediately if we already
+						%% received a close frame.
+						case In of
+							close -> close;
+							_ -> closing(State)
+						end
+					], EvHandlerState};
+				true ->
+					{[], EvHandlerState}
+			end;
+		Error={error, _} ->
+			{Error, EvHandlerState0}
 	end.
 
 %% Send many frames.
@@ -346,6 +350,5 @@ ws_send([Frame|Tail], State, ReplyTo, EvHandler, EvHandlerState0) ->
 ws_send(Frames, State, _StreamRef, ReplyTo, EvHandler, EvHandlerState) ->
 	ws_send(Frames, State, ReplyTo, EvHandler, EvHandlerState).
 
-%% Websocket has no concept of streams.
-down(_) ->
-	[].
+down(#ws_state{stream_ref=StreamRef}) ->
+	[StreamRef].

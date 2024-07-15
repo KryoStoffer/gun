@@ -1,4 +1,4 @@
-%% Copyright (c) 2019-2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2019-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -50,7 +50,8 @@ do_proxy_init(Parent, Transport, Auth) ->
 			gen_tcp:listen(0, [binary, {active, false}]);
 		gun_tls ->
 			Opts = ct_helper:get_certs_from_ets(),
-			ssl:listen(0, [binary, {active, false}|Opts])
+			ssl:listen(0, [binary, {active, false}, {verify, verify_none},
+				{fail_if_no_peer_cert, false}|Opts])
 	end,
 	{ok, {_, Port}} = Transport:sockname(ListenSocket),
 	Parent ! {self(), Port},
@@ -59,8 +60,8 @@ do_proxy_init(Parent, Transport, Auth) ->
 			gen_tcp:accept(ListenSocket, 5000);
 		gun_tls ->
 			{ok, ClientSocket0} = ssl:transport_accept(ListenSocket, 5000),
-			ssl:ssl_accept(ClientSocket0, 5000),
-			{ok, ClientSocket0}
+			{ok, ClientSocket1} = ssl:handshake(ClientSocket0, 5000),
+			{ok, ClientSocket1}
 	end,
 	Recv = case Transport of
 		gun_tcp -> fun gen_tcp:recv/3;
@@ -214,11 +215,13 @@ do_socks5(OriginScheme, OriginTransport, OriginProtocol, ProxyTransport, SocksAu
 	Authority = iolist_to_binary(["localhost:", integer_to_binary(OriginPort)]),
 	{ok, ConnPid} = gun:open("localhost", ProxyPort, #{
 		transport => ProxyTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 		protocols => [{socks, #{
 			auth => [SocksAuth],
 			host => "localhost",
 			port => OriginPort,
 			transport => OriginTransport,
+			tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 			protocols => [OriginProtocol]
 		}}]
 	}),
@@ -289,14 +292,17 @@ do_socks5_through_multiple_proxies(OriginScheme, OriginTransport, ProxyTransport
 	Authority = iolist_to_binary(["localhost:", integer_to_binary(OriginPort)]),
 	{ok, ConnPid} = gun:open("localhost", Proxy1Port, #{
 		transport => ProxyTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 		protocols => [{socks, #{
 			host => "localhost",
 			port => Proxy2Port,
 			transport => ProxyTransport,
+			tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 			protocols => [{socks, #{
 				host => "localhost",
 				port => OriginPort,
-				transport => OriginTransport
+				transport => OriginTransport,
+				tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}]
 			}}]
 		}}]
 	}),
@@ -365,7 +371,8 @@ do_socks5_through_connect_proxy(OriginScheme, OriginTransport, ProxyTransport) -
 	{ok, Proxy1Pid, Proxy1Port} = rfc7231_SUITE:do_proxy_start(ProxyTransport),
 	{ok, Proxy2Pid, Proxy2Port} = do_proxy_start(ProxyTransport, none),
 	{ok, ConnPid} = gun:open("localhost", Proxy1Port, #{
-		transport => ProxyTransport
+		transport => ProxyTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}]
 	}),
 	%% We receive a gun_up first. This is the HTTP proxy.
 	{ok, http} = gun:await_up(ConnPid),
@@ -374,10 +381,12 @@ do_socks5_through_connect_proxy(OriginScheme, OriginTransport, ProxyTransport) -
 		host => "localhost",
 		port => Proxy2Port,
 		transport => ProxyTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 		protocols => [{socks, #{
 			host => "localhost",
 			port => OriginPort,
-			transport => OriginTransport
+			transport => OriginTransport,
+			tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}]
 		}}]
 	}),
 	{request, <<"CONNECT">>, Authority1, 'HTTP/1.1', _} = receive_from(Proxy1Pid),

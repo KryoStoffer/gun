@@ -1,4 +1,4 @@
-%% Copyright (c) 2019-2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2019-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -83,7 +83,7 @@
 -type request_start_event() :: #{
 	stream_ref := gun:stream_ref(),
 	reply_to := pid(),
-	function := headers | request | ws_upgrade,
+	function := headers | request | ws_upgrade, %% @todo connect?
 	method := iodata(),
 	scheme => binary(),
 	authority := iodata(),

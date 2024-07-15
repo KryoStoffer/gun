@@ -1,4 +1,4 @@
-%% Copyright (c) 2019-2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2019-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -301,7 +301,7 @@ http1_response_connection_close_delayed_body(_) ->
 	doc("HTTP/1.1: Confirm that requests initiated when Gun has received a "
 		"connection: close response header fail immediately if retry "
 		"is disabled, without waiting for the response body."),
-	ServerFun = fun(_Parent, ClientSocket, gen_tcp) ->
+	ServerFun = fun(_, _, ClientSocket, gen_tcp) ->
 		try
 			{ok, Req} = gen_tcp:recv(ClientSocket, 0, 5000),
 			<<"GET / HTTP/1.1\r\n", _/binary>> = Req,
@@ -311,6 +311,7 @@ http1_response_connection_close_delayed_body(_) ->
 			timer:sleep(500),
 			ok = gen_tcp:send(ClientSocket, " world!")
 		after
+			timer:sleep(1000),
 			gen_tcp:close(ClientSocket)
 		end
 	end,
@@ -405,7 +406,7 @@ http2_server_goaway_no_streams(_) ->
 	doc("HTTP/2: Confirm that the Gun process shuts down gracefully "
 		"when receiving a GOAWAY frame with no active streams and "
 		"retry is disabled."),
-	{ok, OriginPid, Port} = init_origin(tcp, http2, fun(_, Socket, Transport) ->
+	{ok, OriginPid, Port} = init_origin(tcp, http2, fun(_, _, Socket, Transport) ->
 		receive go_away -> ok end,
 		Transport:send(Socket, cow_http2:goaway(0, no_error, <<>>)),
 		timer:sleep(500)
@@ -424,7 +425,7 @@ http2_server_goaway_one_stream(_) ->
 	doc("HTTP/2: Confirm that the Gun process shuts down gracefully "
 		"when receiving a GOAWAY frame with one active stream and "
 		"retry is disabled."),
-	{ok, OriginPid, OriginPort} = init_origin(tcp, http2, fun(_, Socket, Transport) ->
+	{ok, OriginPid, OriginPort} = init_origin(tcp, http2, fun(_, _, Socket, Transport) ->
 		%% Receive a HEADERS frame.
 		{ok, <<SkipLen:24, 1:8, _:8, 1:32>>} = Transport:recv(Socket, 9, 1000),
 		%% Skip the header.
@@ -458,7 +459,7 @@ http2_server_goaway_many_streams(_) ->
 	doc("HTTP/2: Confirm that the Gun process shuts down gracefully "
 		"when receiving a GOAWAY frame with many active streams and "
 		"retry is disabled."),
-	{ok, OriginPid, OriginPort} = init_origin(tcp, http2, fun(_, Socket, Transport) ->
+	{ok, OriginPid, OriginPort} = init_origin(tcp, http2, fun(_, _, Socket, Transport) ->
 		%% Stream 1.
 		%% Receive a HEADERS frame.
 		{ok, <<SkipLen1:24, 1:8, _:8, 1:32>>} = Transport:recv(Socket, 9, 1000),
@@ -593,6 +594,7 @@ ws_gun_send_close_frame(Config) ->
 	Frame = {close, 3333, <<>>},
 	gun:ws_send(ConnPid, StreamRef, Frame),
 	{ws, Frame} = gun:await(ConnPid, StreamRef),
+	ws_is_down(ConnPid, StreamRef, normal),
 	gun_is_down(ConnPid, ConnRef, normal).
 
 ws_gun_receive_close_frame(Config) ->
@@ -607,6 +609,7 @@ ws_gun_receive_close_frame(Config) ->
 	{upgrade, [<<"websocket">>], _} = gun:await(ConnPid, StreamRef),
 	%% We expect a close frame before the connection is closed.
 	{ws, {close, 3333, <<>>}} = gun:await(ConnPid, StreamRef),
+	ws_is_down(ConnPid, StreamRef, normal),
 	gun_is_down(ConnPid, ConnRef, normal).
 
 closing_gun_shutdown(Config) ->
@@ -657,5 +660,13 @@ gun_is_down(ConnPid, ConnRef, Expected) ->
 	receive
 		{'DOWN', ConnRef, process, ConnPid, Reason} ->
 			Expected = Reason,
+			ok
+	end.
+
+ws_is_down(ConnPid, StreamRef, Expected) ->
+	receive
+		{gun_down, ConnPid, ws, Reason, StreamsDown} ->
+			Expected = Reason,
+			[StreamRef] = StreamsDown,
 			ok
 	end.

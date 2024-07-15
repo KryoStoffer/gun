@@ -1,4 +1,4 @@
-%% Copyright (c) 2018-2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2018-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -62,7 +62,9 @@ do_proxy_init(Proxy=#proxy{parent=Parent, transport=Transport}) ->
 			gen_tcp:listen(0, [binary, {active, false}]);
 		gun_tls ->
 			Opts = ct_helper:get_certs_from_ets(),
-			ssl:listen(0, [binary, {active, false}, {alpn_preferred_protocols, [<<"h2">>]}|Opts])
+			ssl:listen(0, [binary, {active, false}, {verify, verify_none},
+				{fail_if_no_peer_cert, false},
+				{alpn_preferred_protocols, [<<"h2">>]}|Opts])
 	end,
 	{ok, {_, Port}} = Transport:sockname(ListenSocket),
 	Parent ! {self(), Port},
@@ -176,7 +178,7 @@ authority_default_port_https(_) ->
 authority_ipv6(_) ->
 	doc("When connecting to a server using an IPv6 address the :authority "
 		"pseudo-header must wrap the address with brackets. (RFC7540 8.1.2.3, RFC3986 3.2.2)"),
-	{ok, OriginPid, OriginPort} = init_origin(tcp6, http2, fun(Parent, Socket, Transport) ->
+	{ok, OriginPid, OriginPort} = init_origin(tcp6, http2, fun(Parent, _, Socket, Transport) ->
 		%% Receive the HEADERS frame and send the headers decoded.
 		{ok, <<Len:24, 1:8, _:8, 1:32>>} = Transport:recv(Socket, 9, 1000),
 		{ok, ReqHeadersBlock} = Transport:recv(Socket, Len, 1000),
@@ -205,7 +207,7 @@ authority_other_port_https(_) ->
 	do_authority_port(tls, 80, <<":80">>).
 
 do_authority_port(Transport0, DefaultPort, AuthorityHeaderPort) ->
-	{ok, OriginPid, OriginPort} = init_origin(Transport0, http2, fun(Parent, Socket, Transport) ->
+	{ok, OriginPid, OriginPort} = init_origin(Transport0, http2, fun(Parent, _, Socket, Transport) ->
 		%% Receive the HEADERS frame and send the headers decoded.
 		{ok, <<Len:24, 1:8, _:8, 1:32>>} = Transport:recv(Socket, 9, 1000),
 		{ok, ReqHeadersBlock} = Transport:recv(Socket, Len, 1000),
@@ -214,6 +216,7 @@ do_authority_port(Transport0, DefaultPort, AuthorityHeaderPort) ->
 	end),
 	{ok, ConnPid} = gun:open("localhost", OriginPort, #{
 		transport => Transport0,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 		protocols => [http2]
 	}),
 	{ok, http2} = gun:await_up(ConnPid),
@@ -234,7 +237,7 @@ prior_knowledge_preface_garbage(_) ->
 		"an invalid preface in the form of garbage when connecting "
 		"using the prior knowledge method. (RFC7540 3.4, RFC7540 3.5)"),
 	%% We use 'http' here because we are going to do the handshake manually.
-	{ok, OriginPid, Port} = init_origin(tcp, http, fun(_, Socket, Transport) ->
+	{ok, OriginPid, Port} = init_origin(tcp, http, fun(_, _, Socket, Transport) ->
 		ok = Transport:send(Socket, <<0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15>>),
 		timer:sleep(100)
 	end),
@@ -256,7 +259,7 @@ prior_knowledge_preface_http1(_) ->
 		"an invalid preface in the form of an HTTP/1.1 response when connecting "
 		"using the prior knowledge method. (RFC7540 3.4, RFC7540 3.5)"),
 	%% We use 'http' here because we are going to do the handshake manually.
-	{ok, OriginPid, Port} = init_origin(tcp, http, fun(_, Socket, Transport) ->
+	{ok, OriginPid, Port} = init_origin(tcp, http, fun(_, _, Socket, Transport) ->
 		ok = Transport:send(Socket, <<
 			"HTTP/1.1 400 Bad Request\r\n"
 			"Connection: close\r\n"
@@ -283,7 +286,7 @@ prior_knowledge_preface_http1_await(_) ->
 		"an invalid preface in the form of an HTTP/1.1 response when connecting "
 		"using the prior knowledge method. (RFC7540 3.4, RFC7540 3.5)"),
 	%% We use 'http' here because we are going to do the handshake manually.
-	{ok, OriginPid, Port} = init_origin(tcp, http, fun(_, Socket, Transport) ->
+	{ok, OriginPid, Port} = init_origin(tcp, http, fun(_, _, Socket, Transport) ->
 		timer:sleep(100),
 		ok = Transport:send(Socket, <<
 			"HTTP/1.1 400 Bad Request\r\n"
@@ -306,7 +309,7 @@ prior_knowledge_preface_other_frame(_) ->
 		"an invalid preface in the form of a non-SETTINGS frame when connecting "
 		"using the prior knowledge method. (RFC7540 3.4, RFC7540 3.5)"),
 	%% We use 'http' here because we are going to do the handshake manually.
-	{ok, OriginPid, Port} = init_origin(tcp, http, fun(_, Socket, Transport) ->
+	{ok, OriginPid, Port} = init_origin(tcp, http, fun(_, _, Socket, Transport) ->
 		ok = Transport:send(Socket, cow_http2:window_update(1)),
 		timer:sleep(100)
 	end),
@@ -326,7 +329,7 @@ prior_knowledge_preface_other_frame(_) ->
 lingering_data_counts_toward_connection_window(_) ->
 	doc("DATA frames received after sending RST_STREAM must be counted "
 		"toward the connection flow-control window. (RFC7540 5.1)"),
-	{ok, OriginPid, Port} = init_origin(tcp, http2, fun(_, Socket, Transport) ->
+	{ok, OriginPid, Port} = init_origin(tcp, http2, fun(_, _, Socket, Transport) ->
 		%% Step 2.
 		%% Receive a HEADERS frame.
 		{ok, <<SkipLen:24, 1:8, _:8, 1:32>>} = Transport:recv(Socket, 9, 1000),
@@ -377,7 +380,7 @@ lingering_data_counts_toward_connection_window(_) ->
 headers_priority_flag(_) ->
 	doc("HEADERS frames may include a PRIORITY flag indicating "
 		"that stream dependency information is attached. (RFC7540 6.2)"),
-	{ok, OriginPid, Port} = init_origin(tcp, http2, fun(_, Socket, Transport) ->
+	{ok, OriginPid, Port} = init_origin(tcp, http2, fun(_, _, Socket, Transport) ->
 		%% Receive a HEADERS frame.
 		{ok, <<_:24, 1:8, _:8, 1:32>>} = Transport:recv(Socket, 9, 1000),
 		%% Send a HEADERS frame with PRIORITY back.
@@ -413,7 +416,7 @@ settings_ack_timeout(_) ->
 	doc("Failure to acknowledge the client's SETTINGS frame "
 		"results in a SETTINGS_TIMEOUT connection error. (RFC7540 6.5.3)"),
 	%% We use 'http' here because we are going to do the handshake manually.
-	{ok, _, Port} = init_origin(tcp, http, fun(_, Socket, Transport) ->
+	{ok, _, Port} = init_origin(tcp, http, fun(_, _, Socket, Transport) ->
 		%% Send a valid preface.
 		ok = Transport:send(Socket, cow_http2:settings(#{})),
 		%% Receive the fixed sequence from the preface.
@@ -433,6 +436,60 @@ settings_ack_timeout(_) ->
 	{ok, http2} = gun:await_up(ConnPid),
 	timer:sleep(6000),
 	gun:close(ConnPid).
+
+keepalive_tolerance_ping_ack_timeout(_) ->
+	doc("The PING frame may be used to easily test a connection. (RFC7540 8.1.4)"),
+	{ok, OriginPid, OriginPort} = init_origin(tcp, http2, do_ping_ack_loop_fun()),
+	{ok, Pid} = gun:open("localhost", OriginPort, #{
+		protocols => [http2],
+		http2_opts => #{keepalive => 1000, keepalive_tolerance => 2}
+	}),
+	{ok, http2} = gun:await_up(Pid),
+	handshake_completed = receive_from(OriginPid),
+	%% When Gun sends the first ping, the server acks immediately.
+	receive ping_received -> OriginPid ! send_ping_ack end,
+	timer:sleep(2500), %% Gun sends 2 pings while we sleep. 2 pings not acked.
+	%% Server acks one ping. One ping still not acked.
+	receive ping_received -> OriginPid ! send_ping_ack end,
+	timer:sleep(1000), %% Gun sends 1 ping while we sleep. 2 pings not acked.
+	%% Server acks one ping. One ping still not acked.
+	receive ping_received -> OriginPid ! send_ping_ack end,
+	timer:sleep(1000), %% Gun sends 1 ping while we sleep. 2 pings not acked.
+	%% Check that we haven't received a gun_down yet.
+	receive
+		GunDown when element(1, GunDown) =:= gun_down ->
+			error(unexpected)
+	after 0 ->
+		ok
+	end,
+	%% Within the next 500ms, Gun wants to send another ping, which would
+	%% result in 3 outstanding pings. Instead, Gun goes down.
+	receive
+		{gun_down, Pid, http2, {error, {connection_error, no_error, _}}, []} ->
+			gun:close(Pid)
+	after 1000 ->
+		error(timeout)
+	end.
+
+do_ping_ack_loop_fun() ->
+	%% Receive ping, sync with parent, send ping ack, loop.
+	fun Loop(Parent, ListenSocket, Socket, Transport) ->
+		{ok, Data} = Transport:recv(Socket, 9, infinity),
+		<<Len:24, 6:8, %% PING
+			0:8, %% Flags
+			0:1, 0:31>> = Data,
+		{ok, Payload} = Transport:recv(Socket, Len, 1000),
+		8 = Len = byte_size(Payload),
+		Parent ! ping_received,
+		receive
+			send_ping_ack ->
+				Ack = <<8:24, 6:8, %% PING
+					1:8, %% Ack flag
+					0:1, 0:31, Payload/binary>>,
+				ok = Transport:send(Socket, Ack)
+		end,
+		Loop(Parent, ListenSocket, Socket, Transport)
+	end.
 
 connect_http_via_h2c(_) ->
 	doc("CONNECT can be used to establish a TCP connection "
@@ -475,7 +532,7 @@ connect_h2_via_h2(_) ->
 	do_connect_http(<<"https">>, tls, http2, <<"https">>, tls).
 
 do_origin_fun(http) ->
-	fun(Parent, Socket, Transport) ->
+	fun(Parent, ListenSocket, Socket, Transport) ->
 		%% Receive the request-line and headers, parse and send them.
 		{ok, Data} = Transport:recv(Socket, 0, 5000),
 		{Method, Target, 'HTTP/1.1', Rest} = cow_http:parse_request_line(Data),
@@ -487,16 +544,16 @@ do_origin_fun(http) ->
 			<<":method">> => Method,
 			<<":path">> => Target
 		}},
-		gun_test:loop_origin(Parent, Socket, Transport)
+		gun_test:loop_origin(Parent, ListenSocket, Socket, Transport)
 	end;
 do_origin_fun(http2) ->
-	fun(Parent, Socket, Transport) ->
+	fun(Parent, ListenSocket, Socket, Transport) ->
 		%% Receive the HEADERS frame and send the headers decoded.
 		{ok, <<Len:24, 1:8, _:8, 1:32>>} = Transport:recv(Socket, 9, 1000),
 		{ok, ReqHeadersBlock} = Transport:recv(Socket, Len, 1000),
 		{ReqHeaders, _} = cow_hpack:decode(ReqHeadersBlock),
 		Parent ! {self(), maps:from_list(ReqHeaders)},
-		gun_test:loop_origin(Parent, Socket, Transport)
+		gun_test:loop_origin(Parent, ListenSocket, Socket, Transport)
 	end.
 
 do_connect_http(OriginScheme, OriginTransport, OriginProtocol, ProxyScheme, ProxyTransport) ->
@@ -507,6 +564,7 @@ do_connect_http(OriginScheme, OriginTransport, OriginProtocol, ProxyScheme, Prox
 	Authority = iolist_to_binary(["localhost:", integer_to_binary(OriginPort)]),
 	{ok, ConnPid} = gun:open("localhost", ProxyPort, #{
 		transport => ProxyTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 		protocols => [http2]
 	}),
 	{ok, http2} = gun:await_up(ConnPid),
@@ -515,6 +573,7 @@ do_connect_http(OriginScheme, OriginTransport, OriginProtocol, ProxyScheme, Prox
 		host => "localhost",
 		port => OriginPort,
 		transport => OriginTransport,
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 		protocols => [OriginProtocol]
 	}),
 	{request, #{
@@ -610,6 +669,7 @@ do_connect_cowboy(_OriginScheme, OriginTransport, OriginProtocol, _ProxyScheme, 
 		Authority = iolist_to_binary(["localhost:", integer_to_binary(OriginPort)]),
 		{ok, ConnPid} = gun:open("localhost", ProxyPort, #{
 			transport => ProxyTransport,
+			tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 			protocols => [http2]
 		}),
 		{ok, http2} = gun:await_up(ConnPid),
@@ -618,6 +678,7 @@ do_connect_cowboy(_OriginScheme, OriginTransport, OriginProtocol, _ProxyScheme, 
 			host => "localhost",
 			port => OriginPort,
 			transport => OriginTransport,
+			tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 			protocols => [OriginProtocol]
 		}),
 		{request, #{
@@ -657,7 +718,7 @@ do_cowboy_origin(OriginTransport, OriginProtocol) ->
 connect_handshake_timeout(_) ->
 	doc("HTTP/2 timeouts are properly routed to the appropriate "
 		"tunnel layer. (RFC7540 3.5, RFC7540 8.3)"),
-	{ok, _, OriginPort} = init_origin(tcp, raw, fun(_, _, _) ->
+	{ok, _, OriginPort} = init_origin(tcp, raw, fun(_, _, _, _) ->
 		timer:sleep(5000)
 	end),
 	{ok, ProxyPid, ProxyPort} = do_proxy_start(tcp, [
@@ -705,6 +766,7 @@ do_connect_via_multiple_proxies(OriginTransport, OriginProtocol,
 		%% First proxy.
 		{ok, ConnPid} = gun:open("localhost", Proxy1Port, #{
 			transport => Proxy1Transport,
+			tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 			protocols => [http2]
 		}),
 		{ok, http2} = gun:await_up(ConnPid),
@@ -714,6 +776,7 @@ do_connect_via_multiple_proxies(OriginTransport, OriginProtocol,
 			host => "localhost",
 			port => Proxy2Port,
 			transport => Proxy2Transport,
+			tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 			protocols => [Proxy2Protocol]
 		}, []),
 		Authority1 = iolist_to_binary(["localhost:", integer_to_binary(Proxy2Port)]),
@@ -728,6 +791,7 @@ do_connect_via_multiple_proxies(OriginTransport, OriginProtocol,
 			host => "localhost",
 			port => OriginPort,
 			transport => OriginTransport,
+			tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']}],
 			protocols => [OriginProtocol]
 		}, [], #{tunnel => StreamRef1}),
 		Authority2 = iolist_to_binary(["localhost:", integer_to_binary(OriginPort)]),

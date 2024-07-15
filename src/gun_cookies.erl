@@ -1,4 +1,4 @@
-%% Copyright (c) 2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2020-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -44,7 +44,7 @@
 	host_only := boolean(),
 	secure_only := boolean(),
 	http_only := boolean(),
-	same_site := strict | lax | none
+	same_site := default | none | strict | lax
 }.
 -export_type([cookie/0]).
 
@@ -185,6 +185,8 @@ session_gc({Mod, State0}) ->
 %% @todo The given URI must be normalized.
 -spec set_cookie(Store, uri_string:uri_map(), binary(), binary(), cow_cookie:cookie_attrs())
 	-> {ok, Store} | {error, any()} when Store::store().
+set_cookie(_, _, Name, Value, _) when byte_size(Name) + byte_size(Value) > 4096 ->
+	{error, larger_than_4096_bytes};
 set_cookie(Store, URI=#{host := Host}, Name, Value, Attrs) ->
 	%% This is where we would add a feature to block cookies (like a blacklist).
 	CurrentTime = erlang:universaltime(),
@@ -284,7 +286,7 @@ set_cookie_secure_match({Mod, State}, Match) ->
 	Mod:set_cookie_secure_match(State, Match).
 
 set_cookie2(Store, _URI, Attrs, Cookie0) ->
-	Cookie = Cookie0#{same_site => maps:get(same_site, Attrs, none)},
+	Cookie = Cookie0#{same_site => maps:get(same_site, Attrs, default)},
 	%% This is where we would perform the same-site checks.
 	%%
 	%% It seems that an option would need to be added to Gun

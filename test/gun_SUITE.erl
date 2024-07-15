@@ -1,4 +1,4 @@
-%% Copyright (c) 2017-2020, Loïc Hoguin <essen@ninenines.eu>
+%% Copyright (c) 2017-2023, Loïc Hoguin <essen@ninenines.eu>
 %%
 %% Permission to use, copy, modify, and/or distribute this software for any
 %% purpose with or without fee is hereby granted, provided that the above
@@ -107,6 +107,21 @@ ignore_empty_data_http(_) ->
 	1 = length(Zero),
 	gun:close(Pid).
 
+ignore_empty_data_fin_http(_) ->
+	doc("When gun:data/4 is called with fin and empty data, it must send a final empty chunk."),
+	{ok, OriginPid, OriginPort} = init_origin(tcp, http),
+	{ok, Pid} = gun:open("localhost", OriginPort),
+	{ok, http} = gun:await_up(Pid),
+	handshake_completed = receive_from(OriginPid),
+	Ref = gun:post(Pid, "/", []),
+	gun:data(Pid, Ref, nofin, "hello"),
+	gun:data(Pid, Ref, fin, ["", <<>>]),
+	Data = receive_all_from(OriginPid, 500),
+	Lines = binary:split(Data, <<"\r\n">>, [global]),
+	Zero = [Z || <<"0">> = Z <- Lines],
+	1 = length(Zero),
+	gun:close(Pid).
+
 ignore_empty_data_http2(_) ->
 	doc("When gun:data/4 is called with nofin and empty data, it must be ignored."),
 	{ok, OriginPid, OriginPort} = init_origin(tcp, http2),
@@ -125,6 +140,29 @@ ignore_empty_data_http2(_) ->
 		6:24, 0, _:7, 0:1, _:32, "hello ",
 		%% Second and final DATA frame.
 		6:24, 0, _:7, 1:1, _:32, "world!"
+	>> = Data,
+	gun:close(Pid).
+
+ignore_empty_data_fin_http2(_) ->
+	doc("When gun:data/4 is called with fin and empty data, it must send a final empty DATA frame."),
+	{ok, OriginPid, OriginPort} = init_origin(tcp, http2),
+	{ok, Pid} = gun:open("localhost", OriginPort, #{protocols => [http2]}),
+	{ok, http2} = gun:await_up(Pid),
+	handshake_completed = receive_from(OriginPid),
+	Ref = gun:put(Pid, "/", []),
+	gun:data(Pid, Ref, nofin, "hello "),
+	gun:data(Pid, Ref, nofin, "world!"),
+	gun:data(Pid, Ref, fin, ["", <<>>]),
+	Data = receive_all_from(OriginPid, 500),
+	<<
+		%% HEADERS frame.
+		Len1:24, 1, _:40, _:Len1/unit:8,
+		%% First DATA frame.
+		6:24, 0, _:7, 0:1, _:32, "hello ",
+		%% Second DATA frame.
+		6:24, 0, _:7, 0:1, _:32, "world!",
+		%% Final empty DATA frame.
+		0:24, 0, _:7, 1:1, _:32
 	>> = Data,
 	gun:close(Pid).
 
@@ -155,7 +193,7 @@ keepalive_infinity(_) ->
 killed_streams_http(_) ->
 	doc("Ensure completed responses with a connection: close are not considered killed streams."),
 	{ok, _, OriginPort} = init_origin(tcp, http,
-		fun (_, ClientSocket, ClientTransport) ->
+		fun (_, _, ClientSocket, ClientTransport) ->
 			{ok, _} = ClientTransport:recv(ClientSocket, 0, 1000),
 			ClientTransport:send(ClientSocket,
 				"HTTP/1.1 200 OK\r\n"
@@ -234,7 +272,7 @@ reply_to_http2(_) ->
 
 do_reply_to(Protocol) ->
 	{ok, OriginPid, OriginPort} = init_origin(tcp, Protocol,
-		fun(_, ClientSocket, ClientTransport) ->
+		fun(_, _, ClientSocket, ClientTransport) ->
 			{ok, _} = ClientTransport:recv(ClientSocket, 0, infinity),
 			ResponseData = case Protocol of
 				http ->
@@ -419,6 +457,40 @@ retry_timeout(_) ->
 	{_, terminate, _} = receive_event(ConnPid),
 	ok.
 
+server_name_indication_custom(_) ->
+	doc("Ensure a custom server_name_indication is accepted."),
+	do_server_name_indication("localhost", net_adm:localhost(), #{
+		tls_opts => [
+			{verify, verify_none}, {versions, ['tlsv1.2']},
+			{fail_if_no_peer_cert, false},
+			{server_name_indication, net_adm:localhost()}]
+	}).
+
+server_name_indication_default(_) ->
+	doc("Ensure a default server_name_indication is accepted."),
+	do_server_name_indication(net_adm:localhost(), net_adm:localhost(), #{
+		tls_opts => [{verify, verify_none}, {versions, ['tlsv1.2']},
+			{fail_if_no_peer_cert, false}]
+	}).
+
+do_server_name_indication(Host, Expected, GunOpts) ->
+	Self = self(),
+	{ok, OriginPid, OriginPort} = init_origin(tls, http,
+		fun(_, _, ClientSocket, _) ->
+			{ok, Info} = ssl:connection_information(ClientSocket),
+			Msg = {sni_hostname, _} = lists:keyfind(sni_hostname, 1, Info),
+			Self ! Msg
+		end),
+	{ok, ConnPid} = gun:open(Host, OriginPort, GunOpts#{
+		transport => tls,
+		retry => 0
+	}),
+	handshake_completed = receive_from(OriginPid),
+	%% The connection will succeed, look up the SNI hostname
+	%% and send it to us as a message, where we can check it.
+	{sni_hostname, Expected} = receive Msg = {sni_hostname, _} -> Msg end,
+	gun:close(ConnPid).
+
 set_owner(_) ->
 	doc("The owner of the connection can be changed."),
 	Self = self(),
@@ -457,7 +529,7 @@ do_shutdown_reason() ->
 stream_info_http(_) ->
 	doc("Ensure the function gun:stream_info/2 works as expected for HTTP/1.1."),
 	{ok, OriginPid, OriginPort} = init_origin(tcp, http,
-		fun(_, ClientSocket, ClientTransport) ->
+		fun(_, _, ClientSocket, ClientTransport) ->
 			%% Wait for the cancel signal.
 			receive cancel -> ok end,
 			%% Then terminate the stream.
@@ -481,13 +553,13 @@ stream_info_http(_) ->
 		state := running
 	}} = gun:stream_info(Pid, StreamRef),
 	gun:cancel(Pid, StreamRef),
-	OriginPid ! cancel,
 	{ok, #{
 		ref := StreamRef,
 		reply_to := Self,
 		state := stopping
 	}} = gun:stream_info(Pid, StreamRef),
-	%% Wait for the stream to be canceled.
+	%% Cancel and wait for the stream to be canceled.
+	OriginPid ! cancel,
 	receive_event(Pid, cancel),
 	fun F() ->
 		case gun:stream_info(Pid, StreamRef) of
@@ -504,7 +576,7 @@ stream_info_http(_) ->
 stream_info_http2(_) ->
 	doc("Ensure the function gun:stream_info/2 works as expected for HTTP/2."),
 	{ok, OriginPid, OriginPort} = init_origin(tcp, http2,
-		fun(_, _, _) -> receive disconnect -> ok end end),
+		fun(_, _, _, _) -> receive disconnect -> ok end end),
 	{ok, Pid} = gun:open("localhost", OriginPort, #{
 		event_handler => {gun_test_event_h, self()},
 		protocols => [http2]
@@ -533,6 +605,74 @@ supervise_false(_) ->
 	{ok, http} = gun:await_up(Pid),
 	[] = [P || {_, P, _, _} <- supervisor:which_children(gun_sup), P =:= Pid],
 	ok.
+
+tls_handshake_error_gun_http2_init_retry_0(_) ->
+	doc("Ensure an early TLS connection close is propagated "
+		"to the user of the connection."),
+	%% The server will immediately close the connection upon
+	%% establishment so that the client's socket is down
+	%% before it attempts to initialise HTTP/2.
+	%%
+	%% We use 'http' for the server to skip the HTTP/2 init
+	%% but the client is connecting using 'http2'.
+	{ok, _, OriginPort} = init_origin(tls, http,
+		fun(_, _, ClientSocket, ClientTransport) ->
+			ClientTransport:close(ClientSocket)
+		end),
+	{ok, ConnPid} = gun:open("localhost", OriginPort, #{
+		event_handler => {gun_test_fun_event_h, #{
+			tls_handshake_end => fun(_, #{socket := _}) ->
+				%% We sleep right after the gun_tls:connect succeeds to make
+				%% sure the next call to the socket fails (as the socket
+				%% should be disconnected at that point by the server because
+				%% we are not sending a certificate). The call we want to fail
+				%% is the sending of the HTTP/2 preface in gun_http2:init.
+				timer:sleep(1000)
+			end
+		}},
+		protocols => [http2],
+		retry => 0,
+		transport => tls,
+		tls_opts => [{verify, verify_none}]
+	}),
+	{error, {down, {shutdown, closed}}} = gun:await_up(ConnPid),
+	gun:close(ConnPid).
+
+tls_handshake_error_gun_http2_init_retry_1(_) ->
+	doc("Ensure an early TLS connection close is propagated "
+		"to the user of the connection and does not result "
+		"in an infinite connect loop."),
+	%% The server will immediately close the connection upon
+	%% establishment so that the client's socket is down
+	%% before it attempts to initialise HTTP/2.
+	%%
+	%% We use 'http' for the server to skip the HTTP/2 init
+	%% but the client is connecting using 'http2'.
+	%%
+	%% We immediately accept another connection to handle
+	%% the coming retry and close that connection again.
+	{ok, _, OriginPort} = init_origin(tls, http,
+		fun(_, ListenSocket, ClientSocket1, ClientTransport) ->
+			ClientTransport:close(ClientSocket1),
+			%% We immediately accept a second connection and close it again.
+			{ok, ClientSocket2t} = ssl:transport_accept(ListenSocket, 5000),
+			{ok, ClientSocket2} = ssl:handshake(ClientSocket2t, 5000),
+			ClientTransport:close(ClientSocket2)
+		end),
+	{ok, ConnPid} = gun:open("localhost", OriginPort, #{
+		event_handler => {gun_test_fun_event_h, #{
+			tls_handshake_end => fun(_, #{socket := _}) ->
+				%% See tls_handshake_error_gun_http2_init_retry_0 for details.
+				timer:sleep(1000)
+			end
+		}},
+		protocols => [http2],
+		retry => 1,
+		transport => tls,
+		tls_opts => [{verify, verify_none}]
+	}),
+	{error, {down, {shutdown, closed}}} = gun:await_up(ConnPid),
+	gun:close(ConnPid).
 
 tls_handshake_timeout(_) ->
 	doc("Ensure an integer value for tls_handshake_timeout is accepted."),
@@ -566,7 +706,7 @@ transform_header_name(_) ->
 unix_socket_connect(_) ->
 	case os:type() of
 		{win32, _} ->
-			doc("Unix Domain Sockets are not available on Windows.");
+			{skip, "Unix Domain Sockets are not available on Windows."};
 		_ ->
 			do_unix_socket_connect()
 	end.
